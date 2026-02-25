@@ -1,6 +1,6 @@
 # Physics-Informed Learning of Jet Stream Variability and Aircraft-Relevant Momentum Transport
 
-This repository provides a full starter implementation for:
+Implementation for:
 
 1. ERA5 data ingestion and preprocessing.
 2. A baseline ML model for jet-stream-related wind prediction.
