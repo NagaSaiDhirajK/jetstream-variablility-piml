@@ -1,0 +1,39 @@
+project:
+  name: jetstream_piml
+  seed: 42
+  output_dir: outputs
+
+data:
+  raw_glob: data/raw/*.nc
+  levels_hpa: [200, 250, 300]  # Preferred; loader falls back to available levels if 300 is missing.
+  temporal_resolution_utc_hours: [0, 6, 12, 18]
+  split:
+    train: 0.70
+    val: 0.15
+    test: 0.15
+  chunking:
+    time: 32
+
+training:
+  batch_size: 8
+  epochs: 20
+  lr: 0.001
+  num_workers: 4
+  pin_memory: true
+  use_mixed_precision: true
+  normalize_inputs: true
+  device: auto
+  max_train_batches: null
+  max_val_batches: null
+
+physics:
+  lambda_geo: 0.05
+  lambda_tw: 0.05
+
+aviation:
+  aircraft_true_airspeed_ms: 230.0
+  corridors: [midwest_to_east, transcon_us, north_atlantic]
+
+evaluation:
+  corridor: transcon_us
+  max_test_batches: 8
