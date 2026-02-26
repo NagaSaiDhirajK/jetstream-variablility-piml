@@ -17,9 +17,12 @@ from training.losses import LossWeights, compute_total_loss
 class TrainConfig:
     epochs: int = 20
     lr: float = 1e-3
+    weight_decay: float = 0.0
+    grad_clip_norm: float | None = 1.0
     use_mixed_precision: bool = True
     lambda_geo: float = 0.05
     lambda_tw: float = 0.05
+    lambda_div: float = 0.0
     device: str = "auto"
     max_train_batches: int | None = None
     max_val_batches: int | None = None
@@ -64,9 +67,9 @@ def train_epoch(
 
     amp_enabled = cfg.use_mixed_precision and dev.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
-    weights = LossWeights(lambda_geo=cfg.lambda_geo, lambda_tw=cfg.lambda_tw)
+    weights = LossWeights(lambda_geo=cfg.lambda_geo, lambda_tw=cfg.lambda_tw, lambda_div=cfg.lambda_div)
 
-    sums = {"total": 0.0, "data": 0.0, "geo": 0.0, "tw": 0.0}
+    sums = {"total": 0.0, "data": 0.0, "geo": 0.0, "tw": 0.0, "div": 0.0}
     n_batches = 0
 
     lat_deg = lat_deg.to(dev)
@@ -98,6 +101,9 @@ def train_epoch(
             )
 
         scaler.scale(losses.total).backward()
+        if cfg.grad_clip_norm is not None:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip_norm)
         scaler.step(optimizer)
         scaler.update()
 
@@ -105,6 +111,7 @@ def train_epoch(
         sums["data"] += float(losses.data.detach().cpu())
         sums["geo"] += float(losses.geostrophic.detach().cpu())
         sums["tw"] += float(losses.thermal_wind.detach().cpu())
+        sums["div"] += float(losses.divergence.detach().cpu())
         n_batches += 1
 
     return {k: v / max(1, n_batches) for k, v in sums.items()}
@@ -120,9 +127,9 @@ def validate_epoch(
     dev: torch.device,
 ) -> dict[str, float]:
     model.eval()
-    weights = LossWeights(lambda_geo=cfg.lambda_geo, lambda_tw=cfg.lambda_tw)
+    weights = LossWeights(lambda_geo=cfg.lambda_geo, lambda_tw=cfg.lambda_tw, lambda_div=cfg.lambda_div)
 
-    sums = {"total": 0.0, "data": 0.0, "geo": 0.0, "tw": 0.0, "rmse_u": 0.0, "rmse_v": 0.0}
+    sums = {"total": 0.0, "data": 0.0, "geo": 0.0, "tw": 0.0, "div": 0.0, "rmse_u": 0.0, "rmse_v": 0.0}
     n_batches = 0
 
     lat_deg = lat_deg.to(dev)
@@ -158,6 +165,7 @@ def validate_epoch(
         sums["data"] += float(losses.data.detach().cpu())
         sums["geo"] += float(losses.geostrophic.detach().cpu())
         sums["tw"] += float(losses.thermal_wind.detach().cpu())
+        sums["div"] += float(losses.divergence.detach().cpu())
         sums["rmse_u"] += float(rmse_u.detach().cpu())
         sums["rmse_v"] += float(rmse_v.detach().cpu())
         n_batches += 1
@@ -175,17 +183,19 @@ def fit(
 ) -> dict[str, list[float]]:
     dev = _device(cfg)
     model.to(dev)
-    optimizer = Adam(model.parameters(), lr=cfg.lr)
+    optimizer = Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     history = {
         "train_total": [],
         "train_data": [],
         "train_geo": [],
         "train_tw": [],
+        "train_div": [],
         "val_total": [],
         "val_data": [],
         "val_geo": [],
         "val_tw": [],
+        "val_div": [],
         "val_rmse_u": [],
         "val_rmse_v": [],
     }
@@ -198,10 +208,12 @@ def fit(
         history["train_data"].append(train_stats["data"])
         history["train_geo"].append(train_stats["geo"])
         history["train_tw"].append(train_stats["tw"])
+        history["train_div"].append(train_stats["div"])
         history["val_total"].append(val_stats["total"])
         history["val_data"].append(val_stats["data"])
         history["val_geo"].append(val_stats["geo"])
         history["val_tw"].append(val_stats["tw"])
+        history["val_div"].append(val_stats["div"])
         history["val_rmse_u"].append(val_stats["rmse_u"])
         history["val_rmse_v"].append(val_stats["rmse_v"])
 

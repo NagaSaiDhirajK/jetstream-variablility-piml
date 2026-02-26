@@ -72,9 +72,14 @@ def main() -> None:
     fit_cfg = TrainConfig(
         epochs=int(train_cfg.get("epochs", 20)),
         lr=float(train_cfg.get("lr", 1e-3)),
+        weight_decay=float(train_cfg.get("weight_decay", 0.0)),
+        grad_clip_norm=(
+            float(train_cfg["grad_clip_norm"]) if train_cfg.get("grad_clip_norm") is not None else None
+        ),
         use_mixed_precision=bool(train_cfg.get("use_mixed_precision", True)),
         lambda_geo=float(physics_cfg.get("lambda_geo", 0.05)),
         lambda_tw=float(physics_cfg.get("lambda_tw", 0.05)),
+        lambda_div=float(physics_cfg.get("lambda_div", 0.0)),
         device=str(train_cfg.get("device", "auto")),
         max_train_batches=(
             int(train_cfg["max_train_batches"]) if train_cfg.get("max_train_batches") is not None else None

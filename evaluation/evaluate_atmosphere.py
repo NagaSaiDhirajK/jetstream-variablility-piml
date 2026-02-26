@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 
+from physics.geostrophic import divergence_residual_loss
 from physics.geostrophic import geostrophic_residual_loss
 from physics.thermal_wind import thermal_wind_residual_loss
 
@@ -43,6 +44,13 @@ def atmospheric_metrics(
         lat_deg=lat_deg,
         lon_deg=lon_deg,
     )
+    div = divergence_residual_loss(
+        u_pred=pred_uv[:, 0],
+        v_pred=pred_uv[:, 1],
+        lat_deg=lat_deg,
+        lon_deg=lon_deg,
+    )
     metrics["geo_violation_mse"] = float(geo.detach().cpu())
     metrics["thermal_wind_violation_mse"] = float(tw.detach().cpu())
+    metrics["divergence_violation_mse"] = float(div.detach().cpu())
     return metrics

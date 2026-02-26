@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
+from physics.geostrophic import divergence_residual_loss
 from physics.geostrophic import geostrophic_residual_loss
 from physics.thermal_wind import thermal_wind_residual_loss
 
@@ -15,6 +16,7 @@ from physics.thermal_wind import thermal_wind_residual_loss
 class LossWeights:
     lambda_geo: float = 0.1
     lambda_tw: float = 0.1
+    lambda_div: float = 0.0
 
 
 @dataclass
@@ -23,6 +25,7 @@ class LossBreakdown:
     data: torch.Tensor
     geostrophic: torch.Tensor
     thermal_wind: torch.Tensor
+    divergence: torch.Tensor
 
 
 def compute_total_loss(
@@ -36,7 +39,7 @@ def compute_total_loss(
     lon_deg: torch.Tensor,
     weights: LossWeights,
 ) -> LossBreakdown:
-    """L_total = L_data + lambda_geo * L_geo + lambda_tw * L_tw."""
+    """L_total = L_data + lambda_geo * L_geo + lambda_tw * L_tw + lambda_div * L_div."""
     u_pred = pred_uv[:, 0]
     v_pred = pred_uv[:, 1]
 
@@ -57,6 +60,23 @@ def compute_total_loss(
         lat_deg=lat_deg,
         lon_deg=lon_deg,
     )
+    div_loss = divergence_residual_loss(
+        u_pred=u_pred,
+        v_pred=v_pred,
+        lat_deg=lat_deg,
+        lon_deg=lon_deg,
+    )
 
-    total = data_loss + (weights.lambda_geo * geo_loss) + (weights.lambda_tw * tw_loss)
-    return LossBreakdown(total=total, data=data_loss, geostrophic=geo_loss, thermal_wind=tw_loss)
+    total = (
+        data_loss
+        + (weights.lambda_geo * geo_loss)
+        + (weights.lambda_tw * tw_loss)
+        + (weights.lambda_div * div_loss)
+    )
+    return LossBreakdown(
+        total=total,
+        data=data_loss,
+        geostrophic=geo_loss,
+        thermal_wind=tw_loss,
+        divergence=div_loss,
+    )
