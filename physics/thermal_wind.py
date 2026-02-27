@@ -16,6 +16,17 @@ from physics.geostrophic import EARTH_RADIUS_M, coriolis_parameter
 R_DRY_AIR = 287.05
 
 
+def _validate_pressure_pair(p_top_hpa: float, p_bottom_hpa: float) -> None:
+    if p_top_hpa <= 0.0 or p_bottom_hpa <= 0.0:
+        raise ValueError(
+            f"Pressure levels must be positive, got p_top_hpa={p_top_hpa}, p_bottom_hpa={p_bottom_hpa}."
+        )
+    if p_bottom_hpa <= p_top_hpa:
+        raise ValueError(
+            f"Expected bottom pressure > top pressure, got p_top_hpa={p_top_hpa}, p_bottom_hpa={p_bottom_hpa}."
+        )
+
+
 def thermal_wind_shear(
     temperature_mid: torch.Tensor,
     lat_deg: torch.Tensor,
@@ -27,6 +38,7 @@ def thermal_wind_shear(
 
     Returns (du, dv) over ln(p_bottom / p_top).
     """
+    _validate_pressure_pair(p_top_hpa=p_top_hpa, p_bottom_hpa=p_bottom_hpa)
     lat_rad = torch.deg2rad(lat_deg)
     lon_rad = torch.deg2rad(lon_deg)
 
@@ -61,6 +73,7 @@ def thermal_wind_residual_loss(
 
     Phase-1 approximates predicted shear using (predicted top wind - provided bottom wind).
     """
+    _validate_pressure_pair(p_top_hpa=p_top_hpa, p_bottom_hpa=p_bottom_hpa)
     target_du, target_dv = thermal_wind_shear(
         temperature_mid=temperature_mid,
         lat_deg=lat_deg,

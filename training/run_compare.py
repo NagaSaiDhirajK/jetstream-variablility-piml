@@ -86,7 +86,12 @@ def _collect_predictions(
         if max_batches is not None and batch_idx >= max_batches:
             break
         x = batch["x"].to(device, non_blocking=True)
-        pred = model(x).cpu()
+        u_bottom_dev = batch["u_bottom"].to(device, non_blocking=True)
+        v_bottom_dev = batch["v_bottom"].to(device, non_blocking=True)
+        try:
+            pred = model(x, u_bottom=u_bottom_dev, v_bottom=v_bottom_dev).cpu()
+        except TypeError:
+            pred = model(x).cpu()
 
         pred_uv.append(pred)
         true_uv.append(batch["target_uv"].cpu())
@@ -105,7 +110,15 @@ def _collect_predictions(
     }
 
 
-def _fit_cfg(cfg: dict, lambda_geo: float, lambda_tw: float, lambda_div: float) -> TrainConfig:
+def _fit_cfg(
+    cfg: dict,
+    lambda_geo: float,
+    lambda_tw: float,
+    lambda_div: float,
+    lambda_vort: float,
+    p_top_hpa: float,
+    p_bottom_hpa: float,
+) -> TrainConfig:
     train_cfg = cfg.get("training", {})
     return TrainConfig(
         epochs=int(train_cfg.get("epochs", 20)),
@@ -114,10 +127,26 @@ def _fit_cfg(cfg: dict, lambda_geo: float, lambda_tw: float, lambda_div: float) 
         grad_clip_norm=(
             float(train_cfg["grad_clip_norm"]) if train_cfg.get("grad_clip_norm") is not None else None
         ),
+        data_loss=str(train_cfg.get("data_loss", "huber")),
+        huber_delta=float(train_cfg.get("huber_delta", 5.0)),
         use_mixed_precision=bool(train_cfg.get("use_mixed_precision", True)),
         lambda_geo=lambda_geo,
         lambda_tw=lambda_tw,
         lambda_div=lambda_div,
+        lambda_vort=lambda_vort,
+        physics_warmup_epochs=int(train_cfg.get("physics_warmup_epochs", 3)),
+        lr_scheduler=str(train_cfg.get("lr_scheduler", "plateau")),
+        plateau_factor=float(train_cfg.get("plateau_factor", 0.5)),
+        plateau_patience=int(train_cfg.get("plateau_patience", 3)),
+        min_lr=float(train_cfg.get("min_lr", 1e-6)),
+        early_stopping_patience=(
+            int(train_cfg["early_stopping_patience"])
+            if train_cfg.get("early_stopping_patience") is not None
+            else None
+        ),
+        early_stopping_min_delta=float(train_cfg.get("early_stopping_min_delta", 0.0)),
+        p_top_hpa=p_top_hpa,
+        p_bottom_hpa=p_bottom_hpa,
         device=str(train_cfg.get("device", "auto")),
         max_train_batches=(
             int(train_cfg["max_train_batches"]) if train_cfg.get("max_train_batches") is not None else None
@@ -131,6 +160,7 @@ def main() -> None:
     data_glob = _resolve_data_glob()
     loaders, meta = _build_loaders(data_glob, cfg)
 
+    model_cfg = cfg.get("model", {})
     physics_cfg = cfg.get("physics", {})
     eval_cfg = cfg.get("evaluation", {})
     corridor_name = str(eval_cfg.get("corridor", "transcon_us"))
@@ -140,18 +170,40 @@ def main() -> None:
 
     lat = torch.from_numpy(meta.lat)
     lon = torch.from_numpy(meta.lon)
+    p_top_hpa = float(meta.levels_hpa[0])
+    p_bottom_hpa = float(meta.levels_hpa[2])
 
-    ml_model = PhysicsInformedWindModel(in_channels=6, hidden_channels=64)
+    ml_model = PhysicsInformedWindModel(
+        in_channels=6,
+        hidden_channels=int(model_cfg.get("hidden_channels", 64)),
+        num_res_blocks=int(model_cfg.get("num_res_blocks", 4)),
+        dropout=float(model_cfg.get("dropout", 0.0)),
+        use_bottom_residual=bool(model_cfg.get("use_bottom_residual", True)),
+    )
     ml_history = fit(
         model=ml_model,
         train_loader=loaders["train"],
         val_loader=loaders["val"],
         lat_deg=lat,
         lon_deg=lon,
-        cfg=_fit_cfg(cfg, lambda_geo=0.0, lambda_tw=0.0, lambda_div=0.0),
+        cfg=_fit_cfg(
+            cfg,
+            lambda_geo=0.0,
+            lambda_tw=0.0,
+            lambda_div=0.0,
+            lambda_vort=0.0,
+            p_top_hpa=p_top_hpa,
+            p_bottom_hpa=p_bottom_hpa,
+        ),
     )
 
-    piml_model = PhysicsInformedWindModel(in_channels=6, hidden_channels=64)
+    piml_model = PhysicsInformedWindModel(
+        in_channels=6,
+        hidden_channels=int(model_cfg.get("hidden_channels", 64)),
+        num_res_blocks=int(model_cfg.get("num_res_blocks", 4)),
+        dropout=float(model_cfg.get("dropout", 0.0)),
+        use_bottom_residual=bool(model_cfg.get("use_bottom_residual", True)),
+    )
     piml_history = fit(
         model=piml_model,
         train_loader=loaders["train"],
@@ -163,6 +215,9 @@ def main() -> None:
             lambda_geo=float(physics_cfg.get("lambda_geo", 0.05)),
             lambda_tw=float(physics_cfg.get("lambda_tw", 0.05)),
             lambda_div=float(physics_cfg.get("lambda_div", 0.0)),
+            lambda_vort=float(physics_cfg.get("lambda_vort", 0.0)),
+            p_top_hpa=p_top_hpa,
+            p_bottom_hpa=p_bottom_hpa,
         ),
     )
 
@@ -182,6 +237,8 @@ def main() -> None:
         v_bottom=ml_eval["v_bottom"],
         lat_deg=lat,
         lon_deg=lon,
+        p_top_hpa=p_top_hpa,
+        p_bottom_hpa=p_bottom_hpa,
     )
     atm_piml = atmospheric_metrics(
         pred_uv=piml_pred,
@@ -192,6 +249,8 @@ def main() -> None:
         v_bottom=ml_eval["v_bottom"],
         lat_deg=lat,
         lon_deg=lon,
+        p_top_hpa=p_top_hpa,
+        p_bottom_hpa=p_bottom_hpa,
     )
 
     aviation = evaluate_wind_products_on_corridor(

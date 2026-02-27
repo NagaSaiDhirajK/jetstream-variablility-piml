@@ -6,6 +6,7 @@ import torch
 
 from physics.geostrophic import divergence_residual_loss
 from physics.geostrophic import geostrophic_residual_loss
+from physics.geostrophic import vorticity_residual_loss
 from physics.thermal_wind import thermal_wind_residual_loss
 
 
@@ -25,6 +26,8 @@ def atmospheric_metrics(
     v_bottom: torch.Tensor,
     lat_deg: torch.Tensor,
     lon_deg: torch.Tensor,
+    p_top_hpa: float = 200.0,
+    p_bottom_hpa: float = 350.0,
 ) -> dict[str, float]:
     """Evaluate wind RMSE and physics-violation magnitudes on a dataset subset."""
     metrics = wind_rmse(pred_uv=pred_uv, true_uv=true_uv)
@@ -43,6 +46,8 @@ def atmospheric_metrics(
         temperature_mid=temperature_mid,
         lat_deg=lat_deg,
         lon_deg=lon_deg,
+        p_top_hpa=p_top_hpa,
+        p_bottom_hpa=p_bottom_hpa,
     )
     div = divergence_residual_loss(
         u_pred=pred_uv[:, 0],
@@ -50,7 +55,15 @@ def atmospheric_metrics(
         lat_deg=lat_deg,
         lon_deg=lon_deg,
     )
+    vort = vorticity_residual_loss(
+        u_pred=pred_uv[:, 0],
+        v_pred=pred_uv[:, 1],
+        geopotential=geopotential,
+        lat_deg=lat_deg,
+        lon_deg=lon_deg,
+    )
     metrics["geo_violation_mse"] = float(geo.detach().cpu())
     metrics["thermal_wind_violation_mse"] = float(tw.detach().cpu())
     metrics["divergence_violation_mse"] = float(div.detach().cpu())
+    metrics["vorticity_violation_mse"] = float(vort.detach().cpu())
     return metrics

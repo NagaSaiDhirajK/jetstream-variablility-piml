@@ -92,6 +92,26 @@ def wind_divergence(
     return du_dx + dv_dy
 
 
+def wind_vorticity(
+    u_field: torch.Tensor,
+    v_field: torch.Tensor,
+    lat_deg: torch.Tensor,
+    lon_deg: torch.Tensor,
+) -> torch.Tensor:
+    """Compute relative vorticity: dv/dx - du/dy.
+
+    Args:
+        u_field: [B, H, W] zonal wind (m/s)
+        v_field: [B, H, W] meridional wind (m/s)
+        lat_deg: [H] latitude array
+        lon_deg: [W] longitude array
+    """
+    dy, dx = _grid_spacing_m(lat_deg, lon_deg)
+    dv_dx = torch.gradient(v_field, dim=2)[0] / dx[None, :, :]
+    du_dy = _safe_central_gradient(u_field, dy, dim=1)
+    return dv_dx - du_dy
+
+
 def geostrophic_residual_loss(
     u_pred: torch.Tensor,
     v_pred: torch.Tensor,
@@ -116,3 +136,20 @@ def divergence_residual_loss(
         raise ValueError(f"reference_scale_s_inv must be positive, got {reference_scale_s_inv}.")
     div = wind_divergence(u_field=u_pred, v_field=v_pred, lat_deg=lat_deg, lon_deg=lon_deg)
     return torch.mean((div / reference_scale_s_inv) ** 2)
+
+
+def vorticity_residual_loss(
+    u_pred: torch.Tensor,
+    v_pred: torch.Tensor,
+    geopotential: torch.Tensor,
+    lat_deg: torch.Tensor,
+    lon_deg: torch.Tensor,
+    reference_scale_s_inv: float = 1e-5,
+) -> torch.Tensor:
+    """L_vort = ||(zeta_pred - zeta_geo) / reference_scale||^2."""
+    if reference_scale_s_inv <= 0.0:
+        raise ValueError(f"reference_scale_s_inv must be positive, got {reference_scale_s_inv}.")
+    u_g, v_g = geostrophic_wind(geopotential=geopotential, lat_deg=lat_deg, lon_deg=lon_deg)
+    zeta_pred = wind_vorticity(u_field=u_pred, v_field=v_pred, lat_deg=lat_deg, lon_deg=lon_deg)
+    zeta_geo = wind_vorticity(u_field=u_g, v_field=v_g, lat_deg=lat_deg, lon_deg=lon_deg)
+    return torch.mean(((zeta_pred - zeta_geo) / reference_scale_s_inv) ** 2)

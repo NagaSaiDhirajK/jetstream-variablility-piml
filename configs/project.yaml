@@ -14,12 +14,27 @@ data:
   chunking:
     time: 32
 
+model:
+  hidden_channels: 64
+  num_res_blocks: 4
+  dropout: 0.05
+  use_bottom_residual: true
+
 training:
   batch_size: 8
   epochs: 20
   lr: 0.001
   weight_decay: 0.00001
   grad_clip_norm: 1.0
+  data_loss: huber
+  huber_delta: 5.0
+  physics_warmup_epochs: 3
+  lr_scheduler: plateau
+  plateau_factor: 0.5
+  plateau_patience: 3
+  min_lr: 0.000001
+  early_stopping_patience: null
+  early_stopping_min_delta: 0.0
   num_workers: 4
   pin_memory: true
   use_mixed_precision: true
@@ -32,6 +47,7 @@ physics:
   lambda_geo: 0.05
   lambda_tw: 0.05
   lambda_div: 0.02
+  lambda_vort: 0.02
 
 aviation:
   aircraft_true_airspeed_ms: 230.0

@@ -3,11 +3,12 @@
 Implementation for:
 
 1. ERA5 data ingestion and preprocessing.
-2. A baseline ML model for jet-stream-related wind prediction.
+2. A residual CNN model for jet-stream-related wind prediction.
 3. A physics-informed model with soft constraints:
    - Geostrophic balance residual
    - Thermal wind balance residual
    - Optional momentum/divergence residual
+   - Optional vorticity consistency residual
 4. Evaluation, visualization, and a simple aviation fuel-burn sensitivity analysis.
 
 ## Project Architecture
@@ -99,10 +100,19 @@ Let `f = 2 * Omega * sin(phi)` be Coriolis parameter.
    - Penalize mismatch between predicted vertical shear and temperature-gradient-driven shear.
 3. Momentum/divergence residual (optional):
    - Penalize horizontal divergence at jet level.
+4. Vorticity consistency residual (optional):
+   - `zeta = dv/dx - du/dy`
+   - Penalize mismatch between predicted relative vorticity and geostrophic relative vorticity.
 
 Total loss:
 
-`L = L_data + lambda_geo * L_geo + lambda_tw * L_tw + lambda_div * L_div`
+`L = L_data + lambda_geo * L_geo + lambda_tw * L_tw + lambda_div * L_div + lambda_vort * L_vort`
+
+Robust training defaults:
+
+1. Data term can use Huber loss (`data_loss: huber`) to reduce outlier sensitivity.
+2. Physics coefficients can warm up over early epochs (`physics_warmup_epochs`) to improve optimization stability.
+3. Gradient clipping and weight decay are enabled from config.
 
 ## Quickstart
 
@@ -156,4 +166,3 @@ Implemented in `src/jetstream_piml/aviation.py`:
    - `% fuel change = beta * mean_headwind (m/s)`
 
 This is intentionally simple and interpretable for first-pass analysis.
-
