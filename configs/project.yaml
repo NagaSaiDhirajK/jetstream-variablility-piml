@@ -1,4 +1,4 @@
-﻿project:
+project:
   name: jetstream_piml
   seed: 42
   output_dir: outputs
@@ -38,13 +38,15 @@ training:
   min_lr: 0.000001
   early_stopping_patience: null
   early_stopping_min_delta: 0.0
-  num_workers: 4
-  pin_memory: true
+  num_workers: 0
+  pin_memory: false
   use_mixed_precision: true
   normalize_inputs: true
   device: auto
   max_train_batches: null
   max_val_batches: null
+  realtime_logs: true
+  log_every_n_batches: 1
 
 physics:
   lambda_geo: 0.05

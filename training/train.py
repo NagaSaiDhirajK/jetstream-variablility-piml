@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 import warnings
 
 import torch
@@ -38,6 +39,12 @@ class TrainConfig:
     device: str = "auto"
     max_train_batches: int | None = None
     max_val_batches: int | None = None
+    realtime_logs: bool = True
+    log_every_n_batches: int = 1
+
+
+def _probe_cuda() -> None:
+    _ = torch.zeros(1, device="cuda")
 
 
 def _device(cfg: TrainConfig) -> torch.device:
@@ -51,13 +58,15 @@ def _device(cfg: TrainConfig) -> torch.device:
     if requested == "cuda":
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA was explicitly requested but is not available.")
+        try:
+            _probe_cuda()
+        except Exception as exc:
+            raise RuntimeError(f"CUDA was explicitly requested but is unusable: {exc}") from exc
         return torch.device("cuda")
 
     if torch.cuda.is_available():
         try:
-            # Probe a tiny CUDA kernel; some GPU/PyTorch combinations report available
-            # but fail at first real kernel launch.
-            _ = torch.zeros(1, device="cuda")
+            _probe_cuda()
             return torch.device("cuda")
         except Exception as exc:
             warnings.warn(f"CUDA is visible but unusable; falling back to CPU. Reason: {exc}")
@@ -95,6 +104,20 @@ def _forward_model(
         return model(x)
 
 
+def _effective_total_batches(loader: DataLoader, cap: int | None) -> int:
+    total = len(loader)
+    if cap is not None:
+        total = min(total, cap)
+    return max(1, total)
+
+
+def _should_log_batch(batch_idx: int, total_batches: int, cfg: TrainConfig) -> bool:
+    if not cfg.realtime_logs:
+        return False
+    every = max(1, int(cfg.log_every_n_batches))
+    return batch_idx == 1 or (batch_idx % every == 0) or (batch_idx == total_batches)
+
+
 def train_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -104,6 +127,7 @@ def train_epoch(
     cfg: TrainConfig,
     weights: LossWeights,
     dev: torch.device,
+    epoch_idx: int,
 ) -> dict[str, float]:
     model.train()
 
@@ -115,8 +139,9 @@ def train_epoch(
 
     lat_deg = lat_deg.to(dev)
     lon_deg = lon_deg.to(dev)
+    total_batches = _effective_total_batches(loader, cfg.max_train_batches)
 
-    for batch in loader:
+    for batch_idx, batch in enumerate(loader, start=1):
         if cfg.max_train_batches is not None and n_batches >= cfg.max_train_batches:
             break
         x = batch["x"].to(dev, non_blocking=True)
@@ -158,6 +183,17 @@ def train_epoch(
         sums["vort"] += float(losses.vorticity.detach().cpu())
         n_batches += 1
 
+        if _should_log_batch(batch_idx=batch_idx, total_batches=total_batches, cfg=cfg):
+            print(
+                (
+                    f"[train] epoch={epoch_idx + 1} batch={batch_idx}/{total_batches} "
+                    f"total={float(losses.total):.4f} data={float(losses.data):.4f} "
+                    f"geo={float(losses.geostrophic):.4f} tw={float(losses.thermal_wind):.4f} "
+                    f"div={float(losses.divergence):.4f} vort={float(losses.vorticity):.4f}"
+                ),
+                flush=True,
+            )
+
     return {k: v / max(1, n_batches) for k, v in sums.items()}
 
 
@@ -170,6 +206,7 @@ def validate_epoch(
     cfg: TrainConfig,
     weights: LossWeights,
     dev: torch.device,
+    epoch_idx: int,
 ) -> dict[str, float]:
     model.eval()
 
@@ -178,8 +215,9 @@ def validate_epoch(
 
     lat_deg = lat_deg.to(dev)
     lon_deg = lon_deg.to(dev)
+    total_batches = _effective_total_batches(loader, cfg.max_val_batches)
 
-    for batch in loader:
+    for batch_idx, batch in enumerate(loader, start=1):
         if cfg.max_val_batches is not None and n_batches >= cfg.max_val_batches:
             break
         x = batch["x"].to(dev, non_blocking=True)
@@ -216,6 +254,16 @@ def validate_epoch(
         sums["rmse_u"] += float(rmse_u.detach().cpu())
         sums["rmse_v"] += float(rmse_v.detach().cpu())
         n_batches += 1
+
+        if _should_log_batch(batch_idx=batch_idx, total_batches=total_batches, cfg=cfg):
+            print(
+                (
+                    f"[val]   epoch={epoch_idx + 1} batch={batch_idx}/{total_batches} "
+                    f"total={float(losses.total):.4f} data={float(losses.data):.4f} "
+                    f"rmse_u={float(rmse_u):.4f} rmse_v={float(rmse_v):.4f}"
+                ),
+                flush=True,
+            )
 
     return {k: v / max(1, n_batches) for k, v in sums.items()}
 
@@ -266,10 +314,19 @@ def fit(
     epochs_without_improve = 0
 
     for epoch_idx in range(cfg.epochs):
+        epoch_start = time.time()
         weight_factor = _physics_weight_factor(epoch_idx=epoch_idx, cfg=cfg)
         weights = _loss_weights(cfg=cfg, factor=weight_factor)
-        train_stats = train_epoch(model, train_loader, optimizer, lat_deg, lon_deg, cfg, weights, dev)
-        val_stats = validate_epoch(model, val_loader, lat_deg, lon_deg, cfg, weights, dev)
+
+        if cfg.realtime_logs:
+            print(
+                f"[epoch-start] epoch={epoch_idx + 1}/{cfg.epochs} "
+                f"physics_weight_factor={weight_factor:.4f}",
+                flush=True,
+            )
+
+        train_stats = train_epoch(model, train_loader, optimizer, lat_deg, lon_deg, cfg, weights, dev, epoch_idx)
+        val_stats = validate_epoch(model, val_loader, lat_deg, lon_deg, cfg, weights, dev, epoch_idx)
         if scheduler is not None:
             scheduler.step(val_stats["total"])
         current_lr = float(optimizer.param_groups[0]["lr"])
@@ -291,6 +348,17 @@ def fit(
         history["val_rmse_u"].append(val_stats["rmse_u"])
         history["val_rmse_v"].append(val_stats["rmse_v"])
 
+        if cfg.realtime_logs:
+            elapsed = time.time() - epoch_start
+            print(
+                (
+                    f"[epoch-end] epoch={epoch_idx + 1}/{cfg.epochs} elapsed_sec={elapsed:.2f} lr={current_lr:.6f} "
+                    f"train_total={train_stats['total']:.4f} val_total={val_stats['total']:.4f} "
+                    f"val_rmse_u={val_stats['rmse_u']:.4f} val_rmse_v={val_stats['rmse_v']:.4f}"
+                ),
+                flush=True,
+            )
+
         if cfg.early_stopping_patience is not None:
             improved = val_stats["total"] < (best_val_total - cfg.early_stopping_min_delta)
             if improved:
@@ -299,6 +367,11 @@ def fit(
             else:
                 epochs_without_improve += 1
                 if epochs_without_improve >= cfg.early_stopping_patience:
+                    if cfg.realtime_logs:
+                        print(
+                            f"[early-stop] Triggered at epoch={epoch_idx + 1} after {epochs_without_improve} non-improving epochs.",
+                            flush=True,
+                        )
                     break
 
     return history
