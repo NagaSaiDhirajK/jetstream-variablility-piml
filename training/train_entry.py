@@ -15,7 +15,7 @@ import yaml
 
 from models.pinn_model import PhysicsInformedWindModel
 from training.train import TrainConfig, fit
-from utils.era5_loader import build_era5_dataloaders
+from utils.era5_loader import build_era5_dataloaders, load_input_norm_npz
 
 
 def _resolve_data_glob() -> str:
@@ -43,7 +43,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--quick",
         action="store_true",
-        help="Short smoke run: epochs=5, max_train_batches=20, max_val_batches=5, num_workers=0, device=cpu.",
+        help=(
+            "Fast smoke run: epochs=2, batch_size=2, max_train_batches=3, max_val_batches=1, "
+            "num_workers=0, device=cpu, normalize_inputs=false, time_stride=4, max_samples=256."
+        ),
     )
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--max-train-batches", type=int, default=None)
@@ -51,19 +54,27 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--device", type=str, default=None, choices=["auto", "cpu", "cuda"])
+    parser.add_argument("--time-stride", type=int, default=None, help="Use every Nth timestamp (>=1).")
+    parser.add_argument("--max-samples", type=int, default=None, help="Max samples per split after striding.")
+    parser.add_argument("--input-norm", type=str, default=None, help="Path to cached input norm NPZ.")
     return parser.parse_args()
 
 
 def _apply_overrides(cfg: dict, args: argparse.Namespace) -> dict:
     train_cfg = cfg.setdefault("training", {})
+    data_cfg = cfg.setdefault("data", {})
 
     if args.quick:
-        train_cfg["epochs"] = 5
-        train_cfg["max_train_batches"] = 20
-        train_cfg["max_val_batches"] = 5
+        train_cfg["epochs"] = 2
+        train_cfg["batch_size"] = 2
+        train_cfg["max_train_batches"] = 3
+        train_cfg["max_val_batches"] = 1
         train_cfg["num_workers"] = 0
         train_cfg["device"] = "cpu"
         train_cfg["use_mixed_precision"] = False
+        train_cfg["normalize_inputs"] = False
+        data_cfg["time_stride"] = 4
+        data_cfg["max_samples"] = 256
 
     if args.epochs is not None:
         train_cfg["epochs"] = args.epochs
@@ -77,6 +88,13 @@ def _apply_overrides(cfg: dict, args: argparse.Namespace) -> dict:
         train_cfg["num_workers"] = args.num_workers
     if args.device is not None:
         train_cfg["device"] = args.device
+    if args.time_stride is not None:
+        data_cfg["time_stride"] = args.time_stride
+    if args.max_samples is not None:
+        data_cfg["max_samples"] = args.max_samples
+    if args.input_norm is not None:
+        data_cfg["input_norm_path"] = args.input_norm
+        train_cfg["normalize_inputs"] = True
 
     return cfg
 
@@ -94,6 +112,20 @@ def main() -> None:
     data_glob = _resolve_data_glob()
     levels = tuple(data_cfg["levels_hpa"]) if "levels_hpa" in data_cfg else None
     split_cfg = data_cfg.get("split", {})
+    time_stride = int(data_cfg.get("time_stride", 1))
+    max_samples = int(data_cfg["max_samples"]) if data_cfg.get("max_samples") is not None else None
+
+    input_norm = None
+    input_norm_path = data_cfg.get("input_norm_path")
+    if input_norm_path:
+        norm_path = Path(str(input_norm_path))
+        if (not norm_path.exists()) and (not norm_path.is_absolute()):
+            alt = PROJECT_ROOT / norm_path
+            if alt.exists():
+                norm_path = alt
+        input_norm = load_input_norm_npz(norm_path)
+        print(f"[info] Using cached input normalization from {norm_path}")
+
     try:
         loaders, meta = build_era5_dataloaders(
             file_pattern=data_glob,
@@ -105,6 +137,9 @@ def main() -> None:
             train_frac=float(split_cfg.get("train", 0.7)),
             val_frac=float(split_cfg.get("val", 0.15)),
             normalize_inputs=bool(train_cfg.get("normalize_inputs", True)),
+            time_stride=time_stride,
+            max_samples=max_samples,
+            input_norm=input_norm,
         )
     except ValueError as exc:
         if "Requested levels" not in str(exc):
@@ -120,6 +155,9 @@ def main() -> None:
             train_frac=float(split_cfg.get("train", 0.7)),
             val_frac=float(split_cfg.get("val", 0.15)),
             normalize_inputs=bool(train_cfg.get("normalize_inputs", True)),
+            time_stride=time_stride,
+            max_samples=max_samples,
+            input_norm=input_norm,
         )
 
     model = PhysicsInformedWindModel(
@@ -181,4 +219,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

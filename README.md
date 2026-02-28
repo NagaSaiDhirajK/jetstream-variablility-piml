@@ -166,3 +166,24 @@ Implemented in `src/jetstream_piml/aviation.py`:
    - `% fuel change = beta * mean_headwind (m/s)`
 
 This is intentionally simple and interpretable for first-pass analysis.
+
+## Faster Repeated Training (Cached Normalization)
+
+If startup is slow, cache input normalization once and reuse it:
+
+```bash
+python scripts/cache_input_norm.py --output data/processed/input_norm_stats.npz
+```
+
+Then run training with cached stats (skips expensive normalization recompute):
+
+```bash
+python training/train_entry.py --input-norm data/processed/input_norm_stats.npz --epochs 20 --device cpu
+```
+
+Optional quick subset controls for debugging:
+
+```bash
+python training/train_entry.py --quick
+python training/train_entry.py --time-stride 8 --max-samples 512 --input-norm data/processed/input_norm_stats.npz
+```

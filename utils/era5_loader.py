@@ -1,4 +1,4 @@
-"""Chunked ERA5 data access for phase-1 PIML training.
+﻿"""Chunked ERA5 data access for phase-1 PIML training.
 
 Uses xarray + dask-backed arrays so large multi-year datasets do not need to be
 loaded fully into host memory.
@@ -29,6 +29,15 @@ class Era5Metadata:
     input_channel_names: list[str]
     input_mean: np.ndarray | None = None
     input_std: np.ndarray | None = None
+
+
+@dataclass
+class InputNormArtifacts:
+    input_mean: np.ndarray
+    input_std: np.ndarray
+    levels_hpa: tuple[int, int, int]
+    input_channel_names: list[str]
+    train_sample_count: int
 
 
 def _resolve_coord_names(ds: xr.Dataset) -> tuple[str, str]:
@@ -88,10 +97,14 @@ def _compute_input_stats(
     levels_hpa: tuple[int, int, int],
     start: int,
     end: int,
+    sample_indices: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute train-split mean/std for input channels only."""
     l_top, l_mid, l_bottom = levels_hpa
-    subset = ds.isel({time_coord: slice(start, end)})
+    if sample_indices is not None:
+        subset = ds.isel({time_coord: sample_indices})
+    else:
+        subset = ds.isel({time_coord: slice(start, end)})
     reduce_dims = [time_coord, "latitude", "longitude"]
 
     channels = [
@@ -114,6 +127,96 @@ def _compute_input_stats(
     return np.asarray(means, dtype=np.float32), np.asarray(stds, dtype=np.float32)
 
 
+def _validate_input_norm(
+    input_norm: tuple[np.ndarray, np.ndarray] | None,
+    expected_channels: int,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    if input_norm is None:
+        return None
+    mean, std = input_norm
+    mean_arr = np.asarray(mean, dtype=np.float32).reshape(-1)
+    std_arr = np.asarray(std, dtype=np.float32).reshape(-1)
+    if mean_arr.size != expected_channels or std_arr.size != expected_channels:
+        raise ValueError(
+            f"input_norm channel count mismatch: expected {expected_channels}, got mean={mean_arr.size}, std={std_arr.size}."
+        )
+    std_arr = np.maximum(std_arr, EPS)
+    return mean_arr, std_arr
+
+
+def load_input_norm_npz(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
+    """Load cached input normalization arrays from an NPZ file."""
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Input norm file not found: {p}")
+    with np.load(p) as data:
+        if "input_mean" not in data or "input_std" not in data:
+            raise ValueError(f"Invalid input norm file {p}: expected keys 'input_mean' and 'input_std'.")
+        mean = np.asarray(data["input_mean"], dtype=np.float32)
+        std = np.asarray(data["input_std"], dtype=np.float32)
+    return mean, std
+
+
+def save_input_norm_npz(
+    path: str | Path,
+    input_mean: np.ndarray,
+    input_std: np.ndarray,
+    input_channel_names: list[str] | None = None,
+    levels_hpa: tuple[int, int, int] | None = None,
+) -> None:
+    """Save normalization arrays (+ optional metadata) to NPZ."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, np.ndarray] = {
+        "input_mean": np.asarray(input_mean, dtype=np.float32),
+        "input_std": np.asarray(input_std, dtype=np.float32),
+    }
+    if input_channel_names is not None:
+        payload["input_channel_names"] = np.asarray(input_channel_names, dtype=str)
+    if levels_hpa is not None:
+        payload["levels_hpa"] = np.asarray(levels_hpa, dtype=np.int32)
+    np.savez_compressed(p, **payload)
+
+
+def compute_input_norm_artifacts(
+    file_pattern: str | Path,
+    chunks: dict[str, int] | None = None,
+    levels_hpa: tuple[int, int, int] | None = None,
+    train_frac: float = 0.7,
+    val_frac: float = 0.15,
+    time_stride: int = 1,
+    max_samples: int | None = None,
+) -> InputNormArtifacts:
+    """Compute train-split input normalization once for reuse across runs."""
+    probe = Era5WindDataset(
+        file_pattern=file_pattern,
+        levels_hpa=levels_hpa,
+        split="train",
+        train_frac=train_frac,
+        val_frac=val_frac,
+        chunks=chunks,
+        input_norm=None,
+        time_stride=time_stride,
+        max_samples=max_samples,
+    )
+    mean, std = _compute_input_stats(
+        ds=probe.ds,
+        time_coord=probe.time_coord,
+        level_coord=probe.level_coord,
+        levels_hpa=probe.levels_hpa,
+        start=probe.start,
+        end=probe.end,
+        sample_indices=probe.time_indices,
+    )
+    return InputNormArtifacts(
+        input_mean=mean,
+        input_std=std,
+        levels_hpa=probe.levels_hpa,
+        input_channel_names=probe.input_channel_names,
+        train_sample_count=len(probe),
+    )
+
+
 class Era5WindDataset(Dataset[dict[str, torch.Tensor]]):
     """Dataset over time-indexed ERA5 fields for upper-level surrogate training.
 
@@ -129,11 +232,17 @@ class Era5WindDataset(Dataset[dict[str, torch.Tensor]]):
         val_frac: float = 0.15,
         chunks: dict[str, int] | None = None,
         input_norm: tuple[np.ndarray, np.ndarray] | None = None,
+        time_stride: int = 1,
+        max_samples: int | None = None,
     ) -> None:
         super().__init__()
 
         if chunks is None:
             chunks = {"time": 32}
+        if time_stride < 1:
+            raise ValueError(f"time_stride must be >= 1, got {time_stride}.")
+        if max_samples is not None and max_samples <= 0:
+            raise ValueError(f"max_samples must be positive when provided, got {max_samples}.")
 
         ds = xr.open_mfdataset(str(file_pattern), combine="by_coords", chunks=chunks)
         time_coord, level_coord = _resolve_coord_names(ds)
@@ -152,7 +261,9 @@ class Era5WindDataset(Dataset[dict[str, torch.Tensor]]):
         self.lon = ds["longitude"].values.astype(np.float32)
         self.times = ds[time_coord].values
         self.input_channel_names = _input_channel_names(levels_hpa)
-        self.input_norm = input_norm
+        self.input_norm = _validate_input_norm(input_norm, expected_channels=len(self.input_channel_names))
+        self.time_stride = time_stride
+        self.max_samples = max_samples
 
         n = ds.sizes[time_coord]
         train_end = int(n * train_frac)
@@ -170,8 +281,17 @@ class Era5WindDataset(Dataset[dict[str, torch.Tensor]]):
         if self.end - self.start <= 0:
             raise ValueError(f"Split {split} is empty. start={self.start}, end={self.end}, n={n}")
 
+        indices = np.arange(self.start, self.end, self.time_stride, dtype=np.int64)
+        if self.max_samples is not None:
+            indices = indices[: self.max_samples]
+        if indices.size == 0:
+            raise ValueError(
+                f"Split {split} became empty after time_stride={self.time_stride}, max_samples={self.max_samples}."
+            )
+        self.time_indices = indices
+
     def __len__(self) -> int:
-        return self.end - self.start
+        return int(self.time_indices.size)
 
     def _at_level(self, var_name: str, t_idx: int, level_hpa: int) -> np.ndarray:
         arr = (
@@ -184,7 +304,7 @@ class Era5WindDataset(Dataset[dict[str, torch.Tensor]]):
         return np.asarray(arr.compute(), dtype=np.float32)
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        t_idx = self.start + idx
+        t_idx = int(self.time_indices[idx])
         l_top, l_mid, l_bottom = self.levels_hpa
 
         t_top = self._at_level("t", t_idx, l_top)
@@ -227,6 +347,9 @@ def build_era5_dataloaders(
     train_frac: float = 0.7,
     val_frac: float = 0.15,
     normalize_inputs: bool = True,
+    time_stride: int = 1,
+    max_samples: int | None = None,
+    input_norm: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> tuple[dict[str, DataLoader], Era5Metadata]:
     train_probe = Era5WindDataset(
         file_pattern=file_pattern,
@@ -236,17 +359,20 @@ def build_era5_dataloaders(
         val_frac=val_frac,
         chunks=chunks,
         input_norm=None,
+        time_stride=time_stride,
+        max_samples=max_samples,
     )
 
-    input_norm: tuple[np.ndarray, np.ndarray] | None = None
-    if normalize_inputs:
-        input_norm = _compute_input_stats(
+    resolved_input_norm = _validate_input_norm(input_norm, expected_channels=len(train_probe.input_channel_names))
+    if normalize_inputs and resolved_input_norm is None:
+        resolved_input_norm = _compute_input_stats(
             ds=train_probe.ds,
             time_coord=train_probe.time_coord,
             level_coord=train_probe.level_coord,
             levels_hpa=train_probe.levels_hpa,
             start=train_probe.start,
             end=train_probe.end,
+            sample_indices=train_probe.time_indices,
         )
 
     train_ds = Era5WindDataset(
@@ -256,7 +382,9 @@ def build_era5_dataloaders(
         train_frac=train_frac,
         val_frac=val_frac,
         chunks=chunks,
-        input_norm=input_norm,
+        input_norm=resolved_input_norm,
+        time_stride=time_stride,
+        max_samples=max_samples,
     )
     val_ds = Era5WindDataset(
         file_pattern=file_pattern,
@@ -265,7 +393,9 @@ def build_era5_dataloaders(
         train_frac=train_frac,
         val_frac=val_frac,
         chunks=chunks,
-        input_norm=input_norm,
+        input_norm=resolved_input_norm,
+        time_stride=time_stride,
+        max_samples=max_samples,
     )
     test_ds = Era5WindDataset(
         file_pattern=file_pattern,
@@ -274,7 +404,9 @@ def build_era5_dataloaders(
         train_frac=train_frac,
         val_frac=val_frac,
         chunks=chunks,
-        input_norm=input_norm,
+        input_norm=resolved_input_norm,
+        time_stride=time_stride,
+        max_samples=max_samples,
     )
 
     loader_kwargs = {
@@ -302,12 +434,12 @@ def build_era5_dataloaders(
         ),
     }
 
-    input_mean = input_norm[0] if input_norm is not None else None
-    input_std = input_norm[1] if input_norm is not None else None
+    input_mean = resolved_input_norm[0] if resolved_input_norm is not None else None
+    input_std = resolved_input_norm[1] if resolved_input_norm is not None else None
     meta = Era5Metadata(
         lat=train_ds.lat,
         lon=train_ds.lon,
-        times=train_ds.times,
+        times=train_ds.times[train_ds.time_indices],
         levels_hpa=train_ds.levels_hpa,
         time_coord=train_ds.time_coord,
         level_coord=train_ds.level_coord,

@@ -1,10 +1,11 @@
-project:
+﻿project:
   name: jetstream_piml
   seed: 42
   output_dir: outputs
 
 data:
   raw_glob: data/raw/*.nc
+  input_norm_path: null  # Optional precomputed NPZ with input_mean/input_std.
   levels_hpa: [200, 250, 300]  # Preferred; loader falls back to available levels if 300 is missing.
   temporal_resolution_utc_hours: [0, 6, 12, 18]
   split:
@@ -13,6 +14,8 @@ data:
     test: 0.15
   chunking:
     time: 32
+  time_stride: 1
+  max_samples: null
 
 model:
   hidden_channels: 64
